@@ -265,6 +265,7 @@ def test_claimed_home_the_run_left_empty_leaves_no_residue(tmp_path, quiet_stub)
     assert not home.exists()
 
 
+@pytest.mark.platforms("posix")
 def test_claimed_home_holding_unaccounted_content_is_kept(tmp_path, unaccounted_stub):
     """Content carrying no provisioning signature is not ours to judge, so it stays."""
     home = _mkdtemp_in(tmp_path)

@@ -310,7 +310,6 @@ it:
 HOME=/path/to/hermes-dev-home scripts/run_tests.sh tests/agent/test_foo.py
 ```
 
-
 Run the relevant JS workspace checks for JS changes. Native install/update
 E2E runs on disposable CI hosts, never against the developer's live app.
 See [Package management](website/docs/reference/package-management.md) for PM commands and runtime ownership.
