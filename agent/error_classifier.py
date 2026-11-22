@@ -1308,8 +1308,12 @@ def _status_429(c: _Ctx) -> Verdict:
 
 def _quota_wall_429(c: _Ctx) -> Optional[Verdict]:
     """Billing verdict for a 429 that says the quota window is spent, else None (fall through)."""
-    if c.code not in _QUOTA_WALL_ERROR_CODES and not any(p in c.msg for p in _QUOTA_WINDOW_EXHAUSTED_PATTERNS):
+    # A structured wall code is decisive: no retry header turns a spent window into a throttle.
+    if c.code in _QUOTA_WALL_ERROR_CODES:
+        return _V_BILLING
+    if not any(p in c.msg for p in _QUOTA_WINDOW_EXHAUSTED_PATTERNS):
         return None
+    # Phrase-only match: a short structured retry window still reads as a throttle.
     wait = _rate_limit_reset_seconds(c.msg, c.body, c.headers)
     return _V_BILLING if wait is None or wait >= _QUOTA_WALL_MIN_RESET_SECONDS else None
 

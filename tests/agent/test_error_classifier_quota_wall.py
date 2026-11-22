@@ -61,19 +61,23 @@ class TestZaiQuotaWall:
         e = _Err("Error code: 429 - Rate limit exhausted, retry after 5s")
         assert _classify(e).reason == FailoverReason.rate_limit
 
-    def test_short_wait_header_with_1310_stays_rate_limit(self):
-        # A structured short retry window beats the code: a throttle, not a wall.
+    @pytest.mark.parametrize("seconds", ["0", "5", "30", "899"])
+    def test_code_1310_is_billing_even_with_short_retry_header(self, seconds):
+        # The structured wall code is decisive: a short retry-after must not turn it into a retry.
         body = {"error": {"code": "1310", "message": "slow down"}}
-        e = _Err("Error code: 429", body=body, headers={"retry-after": "30"})
-        assert _classify(e).reason == FailoverReason.rate_limit
+        e = _Err("Error code: 429", body=body, headers={"retry-after": seconds})
+        result = _classify(e)
+        assert result.reason == FailoverReason.billing
+        assert result.should_fallback is True
+        assert result.retryable is False
 
     @pytest.mark.parametrize("seconds,reason", [
         ("899", FailoverReason.rate_limit),
         ("900", FailoverReason.billing),
     ])
     def test_wall_threshold_is_900_seconds(self, seconds, reason):
-        body = {"error": {"code": "1310", "message": "Weekly/Monthly Limit Exhausted"}}
-        e = _Err("Error code: 429", body=body, headers={"retry-after": seconds})
+        # Phrase-only (no structured code): the 900s reset threshold separates wall from throttle.
+        e = _Err("Error code: 429 - Weekly/Monthly Limit Exhausted", headers={"retry-after": seconds})
         assert _classify(e).reason == reason
 
     @pytest.mark.parametrize("phrase", [
