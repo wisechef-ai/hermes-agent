@@ -37,6 +37,33 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# ── Own the disposal of a disposable HOME ───────────────────────────────────
+# A run whose HOME is a fresh `mktemp -d` directory has no current activation, so
+# the activation step below provisions the whole test environment (~3.6 GB) into
+# $HOME/.hermes/installs — and historically left it there when the run ended. The
+# home belongs to the caller's shell and no EXIT trap can span the execs below
+# (this script execs run-in-hermes-env, which execs back into this script, which
+# execs `env -i` pytest), so a trap anywhere in that chain is wiped before the
+# run finishes. Iterating `HOME=$(mktemp -d) scripts/run_tests.sh …` as a
+# development loop filled a host's disk with 15 GB of orphaned environments.
+#
+# So take ownership of the home now, while it is still empty — that is the proof
+# that everything later found inside it came from this run — and re-run this
+# script under a supervisor that never execs and can therefore still delete it.
+# scripts/_isolated_home.sh holds the checks; a home whose shape says someone
+# named it on purpose is left alone, which keeps the warm-rerun recipe working.
+# shellcheck source=scripts/_isolated_home.sh
+. "$SCRIPT_DIR/_isolated_home.sh"
+if [ -z "${_HERMES_ISOLATED_HOME_ARMED:-}" ] && [ -n "${HOME:-}" ]; then
+  # ARMED is set before the supervisor starts so the supervised child, which
+  # re-enters this script, does not arm a second supervisor over the same home.
+  export _HERMES_ISOLATED_HOME_ARMED=1
+  _hermes_isolated_home_repo="$REPO_ROOT"
+  if hermes_isolated_home_shape_ok "$HOME" && hermes_isolated_home_is_empty "$HOME"; then
+    hermes_isolated_home_supervise "$BASH" "${SCRIPT_DIR}/run_tests.sh" "$@"
+  fi
+fi
+
 # ── Locate python ───────────────────────────────────────────────────────────
 # The suite runs under the checkout's isolated test environment (pm.testenv),
 # and only there: unless the inherited environment is current for this
