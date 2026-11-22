@@ -196,6 +196,7 @@ script or tool in this repository, so the commands below also work without
 | `just fix` | the pinned ruff with `--fix`, then `pnpm -r fix` |
 | `just test <paths>` | `scripts/run_tests.sh <paths>`; refuses to start without a path, even with flags |
 | `just test-all` | the full Python suite |
+| `just test-isolated <paths>` | `scripts/run-in-isolated-home.sh scripts/run_tests.sh <paths>`; the same run in a throwaway `HOME`, removed when the run exits |
 | `just js-install`, `just check-js`, `just test-js` | `pnpm install --frozen-lockfile`, `pnpm -r check`, `pnpm -r test` (after building `@hermes/ink`) |
 | `just desktop`, `just tui` | the desktop and TUI dev servers |
 | `just docs-install`, `just docs-build` | the website's `npm ci` and `build:fast` |
@@ -306,11 +307,35 @@ On Windows, run the script through Bash. When no local `.venv` or `venv`
 contains pytest, the runner accepts the explicit `HERMES_PYTHON` above. It
 clears credentials, isolates `HERMES_HOME`, and runs each test file in a separate
 subprocess through `scripts/run_tests_parallel.py`. It does not use xdist.
+
 When `tests/conftest.py` redirects a production `HERMES_HOME` to a temporary
 session home, it sets the internal `HERMES_TEST_SANDBOX_HOME` marker. This lets
 re-imported test fixtures recognize their own sandbox instead of flagging it as
 real-home I/O. Do not set this marker yourself; set `HERMES_HOME` for a
 disposable development home and let the test runner isolate it.
+
+For a run against a clean account, use the wrapper rather than
+`HOME=$(mktemp -d) scripts/run_tests.sh`:
+
+```bash
+just test-isolated tests/agent/test_foo.py -v
+scripts/run-in-isolated-home.sh scripts/run_tests.sh tests/agent/test_foo.py -v
+```
+
+The first run under a fresh home provisions the whole test environment (~3.6 GB)
+into it, and a home your own shell created is nothing the repo can clean up
+afterwards: a development loop over that one-liner filled a host's disk with
+orphaned environments. The wrapper creates the home, owns it, and removes it when
+the run exits — including when the run fails or is interrupted.
+`HERMES_TEST_ISOLATED_HOME_KEEP=1` leaves it in place to inspect a failed run.
+
+To keep a home *warm* instead — provision once, reuse it, and let reruns skip
+both the gigabytes and the minutes — name it yourself, and nothing will delete
+it:
+
+```bash
+HOME=/path/to/hermes-dev-home scripts/run_tests.sh tests/agent/test_foo.py
+```
 
 Run the relevant JS workspace checks for JS changes. Native install/update
 E2E runs on disposable CI hosts, never against the developer's live app.

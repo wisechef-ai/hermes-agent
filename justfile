@@ -91,6 +91,12 @@ check-nix:
 test +args:
     scripts/run_tests.sh --require-paths "$@"
 
+# Run the named test files in a throwaway HOME, removed when the run exits
+[group('test')]
+[positional-arguments]
+test-isolated +args:
+    scripts/run-in-isolated-home.sh scripts/run_tests.sh --require-paths "$@"
+
 # Run the full Python test suite (about 34k tests)
 [group('test')]
 test-all:

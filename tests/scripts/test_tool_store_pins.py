@@ -122,7 +122,8 @@ def _run_runner(tmp_path: Path, account: Path, home: Path, naming: dict, *, boot
             f"#!/bin/sh\nprintf '%s' \"${{2%/*}}\" > '{root}/provisioned'\nexit 1\n", encoding="utf-8")
     if not (root / "scripts").exists():
         (root / "scripts").mkdir(parents=True)
-        for name in ("run_tests.sh", "run-in-hermes-env", "_activation.sh", "tool_store_pins.py"):
+        for name in ("run_tests.sh", "run-in-hermes-env", "_activation.sh",
+                     "_isolated_home.sh", "tool_store_pins.py"):
             shutil.copy2(ROOT / "scripts" / name, root / "scripts" / name)
         for name in ("pm", "hermes_constants.py", "hermes_platform"):
             (root / name).symlink_to(ROOT / name)
