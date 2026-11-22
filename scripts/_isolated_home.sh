@@ -35,10 +35,13 @@
 #           record is written beside it.
 #   sweep   that record still names this home, dev:ino is unchanged (the
 #           directory was not swapped under us), the claim checks all still
-#           pass, no live process holds it as its cwd, and either the leak
-#           signature ($HOME/.hermes/installs) is present or the home is still
-#           empty. A home the run never provisioned, and that holds content we
-#           cannot account for, is left where it is. When the home is simply gone
+#           pass, no live process holds it as its cwd, and one of three proofs
+#           that the content is ours: the leak signature
+#           ($HOME/.hermes/installs) is present, the home is still empty, or
+#           every path under it is one the runner's own tooling writes (the
+#           sharing case, where there is no signature to find). A home the run
+#           never provisioned, and that holds content we cannot account for, is
+#           left where it is. When the home is simply gone
 #           — the supervised run, or a host sweep, already took it — the record is
 #           retired too, so the temp root holds no dot-file nothing collects and a
 #           later home reusing the leaf is not refused its own claim.
@@ -57,6 +60,36 @@ _hermes_isolated_home_magic="hermes-isolated-home-v1"
 # The directory a provisioned test environment leaves in the home. Its presence
 # is what marks a home as one this run filled.
 _hermes_isolated_home_signature=".hermes/installs"
+
+# The trees the runner's own tooling creates under a home, relative to it.
+#
+# A run whose checkout shares the account's dependency state (the
+# HERMES_INSTALLS_ROOT adoption) never writes .hermes/installs into the home at
+# all — that is the whole point of sharing — yet it is not true that nothing was
+# written: uv still opens its cache and Hermes still opens its log dir. Measured
+# on wisechef-agents, a sharing run leaves a 92 KB home holding exactly
+# .cache/uv/{.gitignore,.lock,CACHEDIR.TAG,sdists-v10,interpreter-v4},
+# .hermes/cache/uv and .hermes/logs/update_receipts. Refusing that home is a
+# false positive: the claim proved it empty before the run, so every byte in it
+# came from the run we supervised. It also costs more than disk — a kept home
+# keeps its provenance record, the host sweep matches /tmp/tmp.* and not these
+# dot-files, and the retirement path only fires once the home is gone, so a
+# sharing loop accumulates one record per iteration forever.
+#
+# Everything outside this set stays unaccountable and is still kept, including a
+# stray file directly under .hermes: the set names the tooling's own subtrees,
+# not the parents that hold them.
+_hermes_isolated_home_accountable=(
+    ".hermes/installs"
+    ".hermes/cache"
+    ".hermes/logs"
+    ".cache/uv"
+)
+
+# Bound on the walk below. It runs only when the signature is absent, so it never
+# descends a provisioned multi-GB tree; the cap is there so a home that somehow
+# grew large without a signature costs a sweep nothing and fails closed.
+_hermes_isolated_home_max_entries=5000
 
 # The leaf prefix this file hands out, and the template a caller gives mktemp from
 # it. The prefix is what the shape check matches: a created home carries mktemp's
@@ -184,6 +217,49 @@ hermes_isolated_home_is_empty() {
         [ -e "$entry" ] || [ -L "$entry" ] || continue
         return 1
     done
+    return 0
+}
+
+# hermes_isolated_home_only_ours DIR: 0 when every entry under DIR is a tree the
+# runner's own tooling is known to create, so the home holds nothing the claim
+# cannot account for. The second proof of ownership, for the case the leak
+# signature cannot make: a run that shared the account's dependency state never
+# filled $HOME/.hermes/installs, but it did write uv's cache and Hermes' log dir,
+# and the claim proved the home empty before it started.
+#
+# Fails closed on every doubt: an unreadable tree, a symlink, anything that is
+# neither file nor directory, a home that grew past the entry cap, or a single
+# path outside the accountable set returns 1 and the home is kept. Costs are
+# bounded because the sweep calls it only when the signature is absent.
+hermes_isolated_home_only_ours() {
+    local dir="$1" entry rel allowed covered listing seen
+    [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
+    # `find` rather than a glob: a glob would not see inside the subtrees, and a
+    # single string keeps the whole traversal's failure status, which a pipe into
+    # a while loop would throw away — a half-read tree must never look accountable.
+    listing="$(find "$dir" -mindepth 1 2>/dev/null)" || return 1
+    [ -n "$listing" ] || return 0          # empty home: already provably ours
+    seen=0
+    while IFS= read -r entry; do
+        [ -n "$entry" ] || continue
+        seen=$(( seen + 1 ))
+        [ "$seen" -le "$_hermes_isolated_home_max_entries" ] || return 1
+        rel="${entry#"$dir"/}"
+        [ "$rel" != "$entry" ] || continue                 # the home itself
+        if [ -L "$entry" ]; then return 1; fi
+        if [ ! -d "$entry" ] && [ ! -f "$entry" ]; then return 1; fi
+        covered=0
+        for allowed in "${_hermes_isolated_home_accountable[@]}"; do
+            case "$rel" in
+                "$allowed" | "$allowed"/*) covered=1 ;;
+                # A parent that only exists to hold an accountable subtree (.hermes,
+                # .cache) may itself be a directory; a file wearing that name may not.
+                "${allowed%%/*}") [ -d "$entry" ] && covered=1 ;;
+            esac
+            [ "$covered" = 1 ] && break
+        done
+        [ "$covered" = 1 ] || return 1
+    done <<<"$listing"
     return 0
 }
 
@@ -363,8 +439,16 @@ hermes_isolated_home_sweep() {
     # anything: we claimed it empty, it is the same directory, and there is nothing
     # in it. Dropping that tombstone is what lets the blessed wrapper leave no
     # residue at all, on runs that never provision as well as the ones that do.
+    #
+    # A sharing run defeats that second case by design: sharing the account's
+    # dependency state is exactly what keeps .hermes/installs out of the home, and
+    # uv and Hermes still leave their scaffolding, so the home is neither signed
+    # nor empty and would be kept forever. hermes_isolated_home_only_ours is the
+    # equivalent proof for it — same claim, same directory, and every path inside
+    # one the runner's own tooling writes.
     if [ -z "$refusal" ] && [ ! -d "$dir/$_hermes_isolated_home_signature" ] \
-            && ! hermes_isolated_home_is_empty "$dir"; then
+            && ! hermes_isolated_home_is_empty "$dir" \
+            && ! hermes_isolated_home_only_ours "$dir"; then
         refusal="the run never provisioned a test environment into it and it holds content we cannot account for"
     fi
     if [ -z "$refusal" ] && hermes_isolated_home_is_mounted "$dir"; then
