@@ -1,0 +1,154 @@
+name: Fork parity — just test-all
+
+# Fork-only CI lane for wisechef-ai/hermes-agent (added by t_d1c0b1bf).
+#
+# WHY THIS EXISTS
+# Upstream's `Tests` lane (`.github/workflows/tests.yml`) schedules every job on
+# `blacksmith-*vcpu-ubuntu-2404` — a third-party runner provider that is not
+# provisioned for this fork or its org. GitHub therefore never assigns a machine
+# to those jobs: every inherited `CI` run sits in `queued`/`pending` forever with
+# zero jobs created, and the fork has never executed a single test job. A plain
+# self-hosted runner does not fix it either, because it would have to be labelled
+# `blacksmith-32vcpu-ubuntu-2404` (i.e. a 4- or 16-core box impersonating a
+# 32-core one) and would then serialise the whole fan-out behind one machine.
+#
+# WHAT THIS DOES INSTEAD
+# Run the exact same entrypoint CI runs — `just test-all` → `scripts/run_tests.sh`
+# (per-file pytest isolation via scripts/run_tests_parallel.py, HERMES_TEST_SLICE
+# partitioning, HERMES_TEST_FORKSERVER, empty provider keys) — on free
+# GitHub-hosted runners, sharded across N slices so the wall clock stays in the
+# same order as CI's three 32-core boxes. The steps mirror the `Run tests` job in
+# tests.yml: pinned ripgrep, the repo's own `setup-pm` locked toolchain with the
+# same test extras, and the WAL-reset SQLite gate that makes silent DELETE-mode
+# runs fail loudly.
+#
+# HONESTY BOUNDARY
+# A green lane here is parity for the *Python test suite* (every test file in the
+# checkout is executed, exactly once, in its own subprocess). It is NOT parity for
+# the lanes this fork can never run without the Blacksmith provider or protected
+# secrets: Windows/macOS/ARM OS lanes, Nix, Docker publish, E2E desktop, and the
+# live-provider canaries. Those stay documented as gaps, not laundered into a
+# green checkmark.
+#
+# Additive by design: no upstream workflow is edited, so a future sync with
+# upstream main carries this file as a fork-only addition.
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: 'Ref or SHA to test (default: the triggering ref)'
+        required: false
+        default: ''
+      slices:
+        description: 'JSON array of slice indices; the denominator is its length'
+        required: false
+        default: '[1,2,3,4,5,6,7,8,9,10,11,12]'
+      workers:
+        description: 'HERMES_TEST_WORKERS per slice (hosted runners have 4 cores)'
+        required: false
+        default: '4'
+  pull_request:
+  push:
+    branches: [main]
+
+# Empty on push/PR (workflow_dispatch inputs are absent there), so those events
+# fall back to the twelve-slice default.
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-parity-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test-all:
+    name: just test-all (${{ matrix.slice }}/${{ length(fromJSON(inputs.slices != '' && inputs.slices || '[1,2,3,4,5,6,7,8,9,10,11,12]')) }})
+    runs-on: ubuntu-24.04
+    # CI gives one slice 30 min on 32 packed cores. Four hosted cores per slice
+    # is ~8x less machine, so the ceiling is scaled, not copied.
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        slice: ${{ fromJSON(inputs.slices != '' && inputs.slices || '[1,2,3,4,5,6,7,8,9,10,11,12]') }}
+    env:
+      HERMES_TEST_SLICE: ${{ matrix.slice }}/${{ length(fromJSON(inputs.slices != '' && inputs.slices || '[1,2,3,4,5,6,7,8,9,10,11,12]')) }}
+      HERMES_TEST_FORKSERVER: '1'
+      HERMES_TEST_WORKERS: ${{ inputs.workers != '' && inputs.workers || '4' }}
+      HERMES_TEST_FILE_TIMEOUT: 600
+      # Same as CI: no test may reach a real provider.
+      OPENROUTER_API_KEY: ''
+      OPENAI_API_KEY: ''
+      NOUS_API_KEY: ''
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.commit }}
+
+      - name: Install ripgrep (prebuilt binary)
+        # Same version and digest as tests.yml: `rg`-backed tests resolve their
+        # results against this exact build.
+        run: |
+          set -euo pipefail
+          RG_VERSION=15.1.0
+          RG_SHA256=1c9297be4a084eea7ecaedf93eb03d058d6faae29bbc57ecdaf5063921491599
+          RG_TARBALL=ripgrep-${RG_VERSION}-x86_64-unknown-linux-musl.tar.gz
+          curl -sSfL --retry 3 --retry-delay 5 -o "$RG_TARBALL" \
+            "https://github.com/BurntSushi/ripgrep/releases/download/${RG_VERSION}/${RG_TARBALL}"
+          echo "${RG_SHA256}  ${RG_TARBALL}" | sha256sum -c -
+          tar -xzf "$RG_TARBALL"
+          sudo mv "ripgrep-${RG_VERSION}-x86_64-unknown-linux-musl/rg" /usr/local/bin/rg
+          rm -rf "$RG_TARBALL" "ripgrep-${RG_VERSION}-x86_64-unknown-linux-musl"
+          rg --version
+
+      - name: Install just (pinned)
+        # Blacksmith's images ship `just`; ubuntu-24.04 does not, and the card
+        # asks for `just test-all` specifically — so install the same version the
+        # repo's own tool store pins, verified by digest, rather than quietly
+        # substituting a direct call to the script.
+        run: |
+          set -euo pipefail
+          JUST_VERSION=1.59.0
+          JUST_SHA256=409044617b6f06517c1035e55ca38c8c856ff8b650e41bc2aa1ef82d5903a23e
+          JUST_TARBALL=just-${JUST_VERSION}-x86_64-unknown-linux-musl.tar.gz
+          curl -sSfL --retry 3 --retry-delay 5 -o "$JUST_TARBALL" \
+            "https://github.com/casey/just/releases/download/${JUST_VERSION}/${JUST_TARBALL}"
+          echo "${JUST_SHA256}  ${JUST_TARBALL}" | sha256sum -c -
+          tar -xzf "$JUST_TARBALL" just
+          sudo mv just /usr/local/bin/just
+          rm -f "$JUST_TARBALL"
+          just --version
+
+      - name: Set up locked Python and test dependencies
+        uses: ./.github/actions/setup-pm
+        with:
+          packages: pnpm
+          extras: '["all", "anthropic", "bedrock", "mistral", "fal", "modal", "daytona", "parallel-web", "keychain"]'
+          test-environment: 'true'
+          prune-python-cache: true
+
+      - name: Check SQLite runs WAL
+        # Copied from tests.yml: an interpreter linking a WAL-reset-buggy SQLite
+        # would silently run every WAL test in DELETE mode. Fail loudly instead.
+        run: |
+          "$HERMES_PYTHON" -c "import sqlite3, sys, hermes_agent.compat as compat; compat.install(); import hermes_state_wal as w; v = w.is_sqlite_wal_reset_vulnerable(); print(f'Python {sys.version.split()[0]}, SQLite {sqlite3.sqlite_version}, WAL-reset vulnerable: {v}'); sys.exit(1 if v else 0)"
+
+      - name: Run tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "▶ slice ${HERMES_TEST_SLICE} · ${HERMES_TEST_WORKERS} workers · $(python3 -c 'import os;print(os.cpu_count())') cores on host"
+          just test-all 2>&1 | tee "/tmp/test-all-${HERMES_TEST_SLICE%%/*}.log"
+
+      - name: Upload slice log
+        # Diagnostics survive the runner: a slice that fails at 03:00 is still
+        # readable without re-running 8000 files.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-all-slice-${{ matrix.slice }}
+          path: /tmp/test-all-*.log
+          if-no-files-found: ignore
+          retention-days: 14
