@@ -63,6 +63,22 @@ if [ "__WRITES__" = "1" ]; then
   mkdir -p "$HOME/.hermes/installs/uv-python-stub"
   head -c 1048576 /dev/zero > "$HOME/.hermes/installs/uv-python-stub/payload"
 fi
+if [ "__SCAFFOLD__" = "1" ]; then
+  # What a run leaves when the checkout's dependency state is SHARED rather than
+  # provisioned into the home: no .hermes/installs at all, but uv opened its
+  # cache and Hermes opened its log dir. Measured, not imagined — this is the
+  # byte-for-byte shape of the 92 KB home a HERMES_INSTALLS_ROOT iteration left
+  # on wisechef-agents, which the signature check alone kept forever.
+  mkdir -p "$HOME/.cache/uv/sdists-v10" "$HOME/.cache/uv/interpreter-v4" \
+           "$HOME/.hermes/cache/uv" "$HOME/.hermes/logs/update_receipts"
+  : > "$HOME/.cache/uv/.gitignore"
+  : > "$HOME/.cache/uv/.lock"
+  : > "$HOME/.cache/uv/CACHEDIR.TAG"
+fi
+if [ "__HERMESSTRAY__" = "1" ]; then
+  mkdir -p "$HOME/.hermes"
+  printf 'not written by the runner\n' > "$HOME/.hermes/state.json"
+fi
 if [ "__HOMEFILE__" = "1" ]; then
   mkdir -p "$HOME/.config/stub"
   head -c 4096 /dev/zero > "$HOME/.config/stub/leftover"
@@ -123,7 +139,13 @@ def _runner_env(
 
 
 def _write_stub(
-    temp_root: Path, name: str, *, writes_installs: bool, writes_home_file: bool = False
+    temp_root: Path,
+    name: str,
+    *,
+    writes_installs: bool,
+    writes_home_file: bool = False,
+    writes_scaffolding: bool = False,
+    writes_hermes_stray: bool = False,
 ) -> Path:
     """A stub interpreter, with the payload decision baked into the file.
 
@@ -133,9 +155,10 @@ def _write_stub(
     """
     path = temp_root / name
     path.write_text(
-        _STUB_INTERPRETER.replace(
-            "__WRITES__", "1" if writes_installs else "0"
-        ).replace("__HOMEFILE__", "1" if writes_home_file else "0"),
+        _STUB_INTERPRETER.replace("__WRITES__", "1" if writes_installs else "0")
+        .replace("__HOMEFILE__", "1" if writes_home_file else "0")
+        .replace("__SCAFFOLD__", "1" if writes_scaffolding else "0")
+        .replace("__HERMESSTRAY__", "1" if writes_hermes_stray else "0"),
         encoding="utf-8",
     )
     path.chmod(0o755)
@@ -158,6 +181,32 @@ def unaccounted_stub(tmp_path) -> Path:
     """A run that provisions nothing yet leaves content behind in the home."""
     return _write_stub(
         tmp_path, "unaccounted-stub", writes_installs=False, writes_home_file=True
+    )
+
+
+@pytest.fixture
+def scaffold_stub(tmp_path) -> Path:
+    """A run whose checkout shared the account's dependency state.
+
+    No test environment is ever written into the home — that is the point of
+    sharing — but uv and Hermes still leave their scaffolding, so the home is
+    neither signed nor empty. This is the shape the dev loop on wisechef-agents
+    runs in every iteration.
+    """
+    return _write_stub(
+        tmp_path, "scaffold-stub", writes_installs=False, writes_scaffolding=True
+    )
+
+
+@pytest.fixture
+def scaffolded_and_stray_stub(tmp_path) -> Path:
+    """The sharing shape plus one file the runner's tooling does not write."""
+    return _write_stub(
+        tmp_path,
+        "scaffolded-stray-stub",
+        writes_installs=False,
+        writes_scaffolding=True,
+        writes_hermes_stray=True,
     )
 
 
@@ -276,6 +325,57 @@ def test_claimed_home_holding_unaccounted_content_is_kept(tmp_path, unaccounted_
     assert result.returncode == 0, result.stdout + result.stderr
     assert home.is_dir()
     assert (home / ".config" / "stub" / "leftover").is_file()
+
+
+@pytest.mark.platforms("posix")
+def test_claimed_home_holding_only_runner_scaffolding_is_removed(
+    tmp_path, scaffold_stub
+):
+    """A sharing run's home is removed even though it was never provisioned.
+
+    The leak signature is the proof that a run filled a home, and a run that
+    shared the account's dependency state never writes it — so on a box where
+    sharing is the chosen state, the signature alone keeps *every* home the loop
+    creates, at 92 KB each, plus one provenance record per iteration that nothing
+    ever collects (the host sweep matches ``/tmp/tmp.*``, not these dot-files).
+    The claim already proved the home empty before the run started and the sweep
+    re-proves it is the same directory, so scaffolding the runner's own tooling
+    wrote is accountable without the signature.
+    """
+    home = _mkdtemp_in(tmp_path)
+    result = _run(
+        ["bash", str(RUN_TESTS), "tests/scripts/test_bash_shebangs.py"],
+        _runner_env(tmp_path, home, scaffold_stub),
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "isolated home: claimed" in result.stderr
+    assert "isolated home: removed" in result.stderr, result.stderr
+    assert not home.exists()
+    assert _installs_dirs(tmp_path) == []
+    assert list(tmp_path.glob(".hermes-isolated-home-v1.*")) == []
+
+
+@pytest.mark.platforms("posix")
+def test_runner_scaffolding_beside_a_stray_file_is_kept(
+    tmp_path, scaffolded_and_stray_stub
+):
+    """Accounting for the tooling's own trees does not widen the delete to the home.
+
+    The accountable set names ``.hermes/cache`` and ``.hermes/logs``, not ``.hermes``
+    itself, so one file the runner did not write — here under ``.hermes`` — still
+    refuses the delete and stays on disk with its scaffolding beside it.
+    """
+    home = _mkdtemp_in(tmp_path)
+    result = _run(
+        ["bash", str(RUN_TESTS), "tests/scripts/test_bash_shebangs.py"],
+        _runner_env(tmp_path, home, scaffolded_and_stray_stub),
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert home.is_dir()
+    assert (home / ".hermes" / "state.json").read_text(encoding="utf-8") == (
+        "not written by the runner\n"
+    )
+    assert (home / ".cache" / "uv" / "CACHEDIR.TAG").is_file()
 
 
 @pytest.mark.platforms("posix")
