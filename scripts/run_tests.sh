@@ -228,6 +228,59 @@ _choose_tool_store() {
   fi
   echo "▶ faked HOME: using the account's tool store $HERMES_RUNTIME_DIR"
 }
+# A faked-HOME run also re-materialises the checkout's dependency state — every generation,
+# the venv and the test environment — under <home>/installs/<install_key>, even though the
+# OS account's own Hermes run has already committed that exact dir: install_key hashes the
+# checkout path, so both homes name the same state. Measured on one dev checkout of this
+# repo: 3,405,856 KB per iteration of a single test file, rebuilt cold every few minutes by
+# a dev loop, and 0 KB once the state is shared. pm honours HERMES_INSTALLS_ROOT only while
+# the launch is provably borrowing the checkout (pm.environments.owning_home_root), so
+# offering it here cannot re-point a normal install; only this runner knows the home is
+# faked. Share only when the account root really holds committed state for THIS checkout
+# (facts.json), checked read-only — no lock, no install — the same discipline
+# _account_tool_store applies to the tool store. An explicit HERMES_INSTALLS_ROOT, a custom
+# HERMES_HOME, a home that already owns state for this checkout, or an account with nothing
+# to reuse keep today's per-home layout. Only this runner's own provisioning gets it: the
+# pytest children below start from `env -i` without it, so a test that exercises install or
+# update still resolves its own dependency state.
+# pm's install_key: the first 16 hex chars of sha256 over the checkout's resolved path.
+# Status 1 when the path or the hash cannot be established — never share on a guessed key,
+# two unrelated checkouts would be pointed at one tree.
+_install_key() {
+  local resolved
+  resolved="$(_resolved_path "$REPO_ROOT")" || return 1
+  [ -n "$resolved" ] || return 1
+  if command -v sha256sum >/dev/null 2>&1; then
+    resolved="$(printf '%s' "$resolved" | sha256sum | cut -c1-16)"
+  elif command -v shasum >/dev/null 2>&1; then
+    resolved="$(printf '%s' "$resolved" | shasum -a 256 | cut -c1-16)"
+  elif command -v openssl >/dev/null 2>&1; then
+    resolved="$(printf '%s' "$resolved" | openssl dgst -sha256 | sed -n 's/.*= *//p' | cut -c1-16)"
+  else
+    return 1
+  fi
+  case "${resolved:-}" in "" | *[!0-9a-f]*) return 1 ;; esac
+  [ "${#resolved}" -eq 16 ] || return 1
+  printf '%s\n' "$resolved"
+}
+_account_installs_state() {
+  local account key root
+  [ -z "${HERMES_INSTALLS_ROOT:-}" ] || return 1
+  case "${HERMES_HOME:-}" in "" | "$HOME/.hermes" | "$HOME/.hermes/"*) ;; *) return 1 ;; esac
+  key="$(_install_key)" || return 1
+  [ ! -f "$HOME/.hermes${HERMES_DATA_DIR_SUFFIX:-}/installs/$key/facts.json" ] || return 1
+  account="$(_account_home)" || return 1
+  root="$account/.hermes${HERMES_DATA_DIR_SUFFIX:-}/installs"
+  [ -f "$root/$key/facts.json" ] && [ -w "$root" ] || return 1
+  printf '%s\n' "$root"
+}
+# Never refuses: every refusal is today's per-home layout, silently.
+_choose_installs_root() {
+  local shared
+  shared="$(_account_installs_state)" || return 0
+  export HERMES_INSTALLS_ROOT="$shared"
+  echo "▶ faked HOME: sharing the account's dependency state $HERMES_INSTALLS_ROOT"
+}
 if [ -z "${__HERMES_ACTIVATED:-}" ] && _has_pytest "${HERMES_PYTHON:-}"; then
   PYTHON="$HERMES_PYTHON"
   echo "▶ not activated — using HERMES_PYTHON: $PYTHON"
@@ -238,6 +291,7 @@ else
       exit 1
     fi
     _choose_tool_store || exit 1
+    _choose_installs_root
     echo "▶ environment missing or stale for $REPO_ROOT — re-running under run-in-hermes-env" >&2
     export __HERMES_TESTS_REEXEC=1
     exec "$SCRIPT_DIR/run-in-hermes-env" "$BASH" "${BASH_SOURCE[0]}" "$@"
