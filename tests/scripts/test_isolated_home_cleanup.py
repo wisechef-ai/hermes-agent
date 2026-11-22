@@ -360,6 +360,31 @@ def test_home_the_environment_already_calls_home_is_kept(tmp_path, stub):
 
 
 @pytest.mark.platforms("posix")
+def test_home_named_by_the_runtime_store_is_kept(tmp_path, stub):
+    """A session that named this home its tool store must not lose it to a run.
+
+    ``HERMES_RUNTIME_DIR`` is PM's inbound override for the tool store, so an
+    exported value naming the home says a session chose that location on purpose.
+    Deleting it is precisely the "a new store per temporary home" failure
+    ``pm/_unstamped_store`` warns about, so the doubt resolves toward keeping; the
+    veto costs a directory the host sweep collects, where deleting it costs the
+    session its store. The installs assertion is what proves the run really
+    provisioned here, so the home surviving cannot be green by doing nothing.
+    """
+    home = _mkdtemp_in(tmp_path)
+    result = _run(
+        ["bash", str(RUN_TESTS), "tests/scripts/test_bash_shebangs.py"],
+        _runner_env(
+            tmp_path, home, stub, HERMES_RUNTIME_DIR=f"{home}/.hermes/runtime"
+        ),
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _installs_dirs(tmp_path) == [home / ".hermes" / "installs"]
+    assert home.is_dir()
+    assert (home / ".hermes" / "installs").is_dir()
+
+
+@pytest.mark.platforms("posix")
 def test_home_named_by_a_symlink_is_kept(tmp_path, stub):
     """A link is not the directory it points at: the target must survive."""
     target = tmp_path / "real-store"

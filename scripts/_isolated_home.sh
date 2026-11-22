@@ -31,8 +31,8 @@
 #           a real directory rather than a link, no link on the way in, owned by
 #           us, not writable by group or other, not the account's own home, not
 #           a mount point, not named by another home-ish variable (HERMES_HOME,
-#           the XDG dirs, TMPDIR), and EMPTY; a provenance record is written
-#           beside it.
+#           HERMES_RUNTIME_DIR, the XDG dirs, TMPDIR), and EMPTY; a provenance
+#           record is written beside it.
 #   sweep   that record still names this home, dev:ino is unchanged (the
 #           directory was not swapped under us), the claim checks all still
 #           pass, no live process holds it as its cwd, and either the leak
@@ -149,10 +149,19 @@ hermes_isolated_home_in_use() {
 # into it expects that home to outlive one command; refusing the claim there
 # costs a directory the host sweep can collect, where deleting it would cost the
 # session its home. Asymmetric on purpose: every doubt resolves toward keeping.
+#
+# HERMES_RUNTIME_DIR belongs in this list for the reason pm/_unstamped_store
+# already states: it is the tool store, and "a new store per temporary home" is
+# exactly the thing a disposable home is expected to throw away — unless a
+# session named it deliberately, which is what an exported value says. It is
+# read here as an inbound override only: pm exports it itself, but that happens
+# during provisioning, after the claim decision has been taken, so the ordinary
+# disposable run (where it is unset, or points at the account's shared store
+# outside the home) is never vetoed by it.
 hermes_isolated_home_is_named_elsewhere() {
     local dir="$1" named value
-    for named in HERMES_HOME XDG_CONFIG_HOME XDG_CACHE_HOME XDG_DATA_HOME \
-                 XDG_STATE_HOME TMPDIR; do
+    for named in HERMES_HOME HERMES_RUNTIME_DIR XDG_CONFIG_HOME XDG_CACHE_HOME \
+                 XDG_DATA_HOME XDG_STATE_HOME TMPDIR; do
         value="${!named:-}"
         [ -n "$value" ] || continue
         case "$value" in
