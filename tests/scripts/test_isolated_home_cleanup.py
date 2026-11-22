@@ -310,6 +310,30 @@ def test_home_not_in_the_mktemp_shape_is_kept(tmp_path, stub):
     """Only a directory nobody else can name is disposable; a hand-made name is not."""
     home = tmp_path / "hermes-dev-home"
     home.mkdir()
+    # 0700, not the host umask's default (002 hosts mkdir 0775): a
+    # group-writable mode would make the permission check the one refusing the
+    # claim, and this test would stop pinning the name-shape check it names.
+    home.chmod(0o700)
+    result = _run(
+        ["bash", str(RUN_TESTS), "tests/scripts/test_bash_shebangs.py"],
+        _runner_env(tmp_path, home, stub),
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _installs_dirs(tmp_path) == [home / ".hermes" / "installs"]
+    assert home.is_dir()
+
+
+@pytest.mark.platforms("posix")
+def test_group_writable_home_is_kept(tmp_path, stub):
+    """A home other writers can reach is not the run's private throwaway.
+
+    mktemp's own mode is 0700; a home widened past that is one someone set up
+    to share. The leaf is mktemp-shaped, so the name check passes and the
+    permission check is the only thing refusing this claim — proven red on its
+    own, not behind the name check's shadow.
+    """
+    home = _mkdtemp_in(tmp_path)
+    home.chmod(0o775)
     result = _run(
         ["bash", str(RUN_TESTS), "tests/scripts/test_bash_shebangs.py"],
         _runner_env(tmp_path, home, stub),
