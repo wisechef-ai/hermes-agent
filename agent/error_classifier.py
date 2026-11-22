@@ -194,6 +194,17 @@ _OVERLOADED_PATTERNS = (
     "at capacity", "over capacity",
 )
 
+# A 429 whose body says the quota window itself is spent (Z.AI code 1310: "Weekly/Monthly Limit
+# Exhausted. Your limit will reset at 2026-11-24_10:00:35"). The reset names a date days away, not a
+# retry delay, so the "resets at" signal that keeps a usage-limit body a throttle does not apply:
+# this is a wall and must fail over at once, never burn the backoff ladder (Chef, 2026-11-22).
+_QUOTA_WINDOW_EXHAUSTED_PATTERNS = (
+    "limit exhausted", "quota exhausted", "quota has been exhausted", "weekly/monthly",
+)
+_QUOTA_WALL_ERROR_CODES = frozenset({"1310"})  # Z.AI "Weekly/Monthly Limit Exhausted"
+# ...unless the body also names a SHORT wait ("rate limit exhausted, retry after 5s"): a throttle.
+_QUOTA_WALL_MIN_RESET_SECONDS = 900.0
+
 # Usage-limit patterns that need disambiguation (billing OR rate_limit), and
 # the signals that mark such a limit as transient (periodic quota, not billing).
 _USAGE_LIMIT_PATTERNS = ("usage limit", "quota", "limit exceeded", "key limit exceeded")
@@ -1295,6 +1306,20 @@ def _status_429(c: _Ctx) -> Verdict:
     return _V_RATE_LIMIT
 
 
+def _quota_wall_429(c: _Ctx) -> Optional[Verdict]:
+    """Billing verdict for a 429 that says the quota window is spent, else None (fall through)."""
+    if c.code not in _QUOTA_WALL_ERROR_CODES and not any(p in c.msg for p in _QUOTA_WINDOW_EXHAUSTED_PATTERNS):
+        return None
+    wait = _rate_limit_reset_seconds(c.msg, c.body, c.headers)
+    return _V_BILLING if wait is None or wait >= _QUOTA_WALL_MIN_RESET_SECONDS else None
+
+
+def _status_429_checked(c: _Ctx) -> Verdict:
+    """429 entry point: a quota wall fails over at once; everything else keeps ``_status_429``."""
+    verdict = _quota_wall_429(c)
+    return verdict if verdict is not None else _status_429(c)
+
+
 def _status_5xx(c: _Ctx) -> Verdict:
     # Request-validation errors as 5xx (codex.nekos.me) fail fast instead of
     # retry-flooding — unless the parameter was injected server-side.
@@ -1476,7 +1501,7 @@ _STATUS_HANDLERS: dict[int, Callable[[_Ctx], Verdict]] = {
     402: lambda c: _classify_402(c.msg, dict, c.code if _is_nous_route(c) else "", c.body),
     403: _status_403, 404: _status_404, 408: lambda c: _V_TIMEOUT, 413: lambda c: _V_PAYLOAD_TOO_LARGE,
     422: lambda c: _classify_image_tool_422(c),
-    429: _status_429, 500: _status_5xx, 502: _status_5xx,
+    429: _status_429_checked, 500: _status_5xx, 502: _status_5xx,
     503: lambda c: _first_match(c.msg, _OVERFLOW_AS_5XX_RULES) or _V_OVERLOADED,
     529: lambda c: _first_match(c.msg, _OVERFLOW_AS_5XX_RULES) or _V_OVERLOADED,
 }
