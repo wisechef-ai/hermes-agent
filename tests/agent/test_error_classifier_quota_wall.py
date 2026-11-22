@@ -57,8 +57,9 @@ class TestZaiQuotaWall:
         assert _classify(_Err(ZAI_1310_TEXT, body=None)).reason == FailoverReason.billing
 
     # ── boundary: things that must NOT become billing ──
-    def test_short_wait_exhausted_stays_rate_limit(self):
-        e = _Err("Error code: 429 - Rate limit exhausted, retry after 5s")
+    def test_ordinary_throttle_with_short_wait_stays_rate_limit(self):
+        # No wall phrase and no wall code: a short retry window is a plain throttle.
+        e = _Err("Error code: 429 - Rate limit reached, retry after 5s", headers={"retry-after": "5"})
         assert _classify(e).reason == FailoverReason.rate_limit
 
     @pytest.mark.parametrize("seconds", ["0", "5", "30", "899"])
@@ -71,14 +72,26 @@ class TestZaiQuotaWall:
         assert result.should_fallback is True
         assert result.retryable is False
 
-    @pytest.mark.parametrize("seconds,reason", [
-        ("899", FailoverReason.rate_limit),
-        ("900", FailoverReason.billing),
+    @pytest.mark.parametrize("seconds", ["0", "5", "30", "899", "900", "86400"])
+    @pytest.mark.parametrize("phrase", [
+        "Weekly/Monthly Limit Exhausted", "Limit Exhausted", "weekly/monthly", "quota exhausted",
     ])
-    def test_wall_threshold_is_900_seconds(self, seconds, reason):
-        # Phrase-only (no structured code): the 900s reset threshold separates wall from throttle.
-        e = _Err("Error code: 429 - Weekly/Monthly Limit Exhausted", headers={"retry-after": seconds})
-        assert _classify(e).reason == reason
+    def test_wall_phrase_is_billing_whatever_the_retry_header_says(self, phrase, seconds):
+        # Phrase-only (no structured code): the phrase is decisive, a short wait must not re-open retries.
+        e = _Err(f"Error code: 429 - {phrase}", headers={"retry-after": seconds})
+        result = _classify(e)
+        assert result.reason == FailoverReason.billing
+        assert result.should_fallback is True
+        assert result.retryable is False
+
+    @pytest.mark.parametrize("msg", [
+        "Limit Exhausted, retry after 5s",
+        "Weekly/Monthly window spent, retry in 30 seconds",
+    ])
+    def test_wall_phrase_with_short_wait_in_the_body_is_billing(self, msg):
+        result = _classify(_Err(f"Error code: 429 - {msg}"))
+        assert result.reason == FailoverReason.billing
+        assert result.should_fallback is True
 
     @pytest.mark.parametrize("phrase", [
         "quota exhausted", "quota has been exhausted", "limit exhausted", "weekly/monthly",
