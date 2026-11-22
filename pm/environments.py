@@ -34,8 +34,33 @@ def installs_root() -> Path:
     return dependency_home_root() / "installs"
 
 
-def install_state_dir(project_root: Path) -> Path:
+def _own_installs_dir(project_root: Path) -> Path:
+    """Where the *active* root keeps this checkout's state, before any borrow is considered."""
     return installs_root() / install_key(project_root)
+
+
+def install_state_dir(project_root: Path) -> Path:
+    """Where this checkout's committed dependency state lives for this process.
+
+    Normally the active root's own ``installs/<install_key>``. A launch that merely *borrows*
+    the checkout (see ``owning_home_root``) may be pointed at the owner's state with
+    ``HERMES_INSTALLS_ROOT``: the throwaway home of a ``HOME=$(mktemp -d)`` test run
+    re-materialises the entire generation set -- every generation, the venv, the test
+    environment, measured 3,405,856 KB for one dev checkout of this repo -- although the OS
+    account's own Hermes run already committed that exact directory, because ``install_key``
+    hashes the *checkout* path and both homes name the same key. Pointed at it, the borrow's
+    sync finds the state current instead of building it again.
+
+    Honouring it is conditioned on the borrow, not merely on the variable being set: a normal
+    install, and any process that inherits the variable into an unrelated launch, keeps
+    private per-home state. Only this one tree is shared -- config, profile state and sessions
+    stay private to the home -- and publication / plugin-selection guards keep comparing
+    against ``dependency_home_root``, which nothing here moves.
+    """
+    override = os.environ.get("HERMES_INSTALLS_ROOT", "").strip()
+    if override and owning_home_root(project_root) is not None:
+        return Path(override).expanduser().resolve() / install_key(project_root)
+    return _own_installs_dir(project_root)
 
 
 def owning_home_root(project_root: Path) -> Path | None:
@@ -65,7 +90,7 @@ def owning_home_root(project_root: Path) -> Path | None:
         return None
     owner = _launcher_bound_root(root, candidates) or candidates[0]
     try:
-        if (owner / "installs" / key).resolve() == install_state_dir(root).resolve():
+        if (owner / "installs" / key).resolve() == _own_installs_dir(root).resolve():
             return None
     except OSError:
         pass
