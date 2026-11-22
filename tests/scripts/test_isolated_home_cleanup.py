@@ -385,6 +385,67 @@ def test_home_named_by_the_runtime_store_is_kept(tmp_path, stub):
 
 
 @pytest.mark.platforms("posix")
+def test_record_is_retired_when_the_command_removes_its_own_home(tmp_path):
+    """A run that cleaned up after itself must not leave its provenance record.
+
+    The record sits beside the home, and the sweep only removed it beside a home
+    the sweep itself deleted. A supervised command that removed its own home
+    therefore stranded the record in the temp root forever: nothing collects these
+    dot-files (the host sweep matches ``/tmp/tmp.*`` environments, not them), and
+    a survivor also refused the claim of any later home that reused the leaf.
+    """
+    self_cleaner = tmp_path / "self-cleaner"
+    self_cleaner.write_text(
+        '#!/usr/bin/env bash\n'
+        'mkdir -p "$HOME/.hermes/installs"\n'
+        'rm -rf "$HOME"\n'
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    self_cleaner.chmod(0o755)
+    result = _run([str(RUN_IN_ISOLATED_HOME), str(self_cleaner)], _base_env(tmp_path))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert list(tmp_path.glob("hermes-isolated-home-*")) == []
+    assert list(tmp_path.glob(".hermes-isolated-home-v1.*")) == []
+
+
+@pytest.mark.platforms("posix")
+def test_record_rewritten_to_another_owner_refuses_the_delete(tmp_path):
+    """The provenance record's owner is load-bearing, not decoration.
+
+    The record is what authorizes the delete, so its pid and uid are compared
+    with this process before anything is removed — the same comparison that makes
+    retiring a record for an already-gone home safe. Without it, planting a
+    record beside a directory would be enough to license deleting it. The
+    supervised command rewrites its own record rather than the test doing it
+    afterwards: the sweep runs once the command has already exited, so a
+    parent-side edit would land either before the claim or after the decision.
+    """
+    tamperer = tmp_path / "tamperer"
+    tamperer.write_text(
+        "#!/usr/bin/env bash\n"
+        'mkdir -p "$HOME/.hermes/installs"\n'
+        'record="$TMPDIR/.hermes-isolated-home-v1.${HOME##*/}"\n'
+        'test -f "$record"\n'
+        "sed -i 's/^pid=.*/pid=999999/' \"$record\"\n"
+        "sed -i 's/^uid=.*/uid=0/' \"$record\"\n"
+        'grep -q "^pid=999999$" "$record"\n'
+        'grep -q "^uid=0$" "$record"\n'
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    tamperer.chmod(0o755)
+    result = _run([str(RUN_IN_ISOLATED_HOME), str(tamperer)], _base_env(tmp_path))
+    assert result.returncode == 0, result.stdout + result.stderr
+    homes = list(tmp_path.glob("hermes-isolated-home-*"))
+    assert len(homes) == 1, f"the home was deleted despite a foreign record: {homes}"
+    assert (homes[0] / ".hermes" / "installs").is_dir()
+    assert list(tmp_path.glob(".hermes-isolated-home-v1.*")), (
+        "a refused delete must keep its record: someone else may hold the claim"
+    )
+
+
+@pytest.mark.platforms("posix")
 def test_home_named_by_a_symlink_is_kept(tmp_path, stub):
     """A link is not the directory it points at: the target must survive."""
     target = tmp_path / "real-store"

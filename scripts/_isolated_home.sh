@@ -38,7 +38,10 @@
 #           pass, no live process holds it as its cwd, and either the leak
 #           signature ($HOME/.hermes/installs) is present or the home is still
 #           empty. A home the run never provisioned, and that holds content we
-#           cannot account for, is left where it is.
+#           cannot account for, is left where it is. When the home is simply gone
+#           — the supervised run, or a host sweep, already took it — the record is
+#           retired too, so the temp root holds no dot-file nothing collects and a
+#           later home reusing the leaf is not refused its own claim.
 # A check that cannot be evaluated refuses the delete and says why. The one
 # exception is the mount and cwd tables on a host without /proc, where every
 # other check still applies and the cost of a missed pass is disk, not data.
@@ -292,7 +295,7 @@ hermes_isolated_home_claim() {
 # leaked directory costs disk while a wrong delete costs the run its data.
 hermes_isolated_home_sweep() {
     local dir="${_HERMES_ISOLATED_HOME_CLAIMED:-}" sentinel refusal="" record pid=""
-    local field value current="" rec_path="" rec_id="" rec_uid="" rec_pid=""
+    local field value current="" rec_path="" rec_id="" rec_uid="" rec_pid="" gone=""
     [ -n "$dir" ] || return 0
     if [ "${HERMES_TEST_ISOLATED_HOME_KEEP:-0}" = "1" ]; then
         hermes_isolated_home_note "keeping $dir (HERMES_TEST_ISOLATED_HOME_KEEP)"
@@ -321,13 +324,36 @@ hermes_isolated_home_sweep() {
         current="$(hermes_isolated_home_stat '%d:%i' '%d:%i' "$dir")" || current=""
         if [ "$rec_path" != "$dir" ]; then
             refusal="its provenance record names $rec_path"
+        elif [ "$rec_pid" != "$$" ] || [ "$rec_uid" != "$EUID" ]; then
+            # Ownership is settled before existence. Retiring a record whose home
+            # has vanished is safe only once the record is proven to be this
+            # process's own, so this branch must stay ahead of the next two.
+            refusal="its provenance record belongs to another process"
         elif [ -z "$current" ]; then
-            refusal="its identity can no longer be read"
+            if [ -e "$dir" ] || [ -L "$dir" ]; then
+                # Something is still there that we cannot identify: keep it.
+                refusal="its identity can no longer be read"
+            else
+                gone=1
+            fi
         elif [ "$rec_id" != "$current" ]; then
             refusal="it is a different directory than the one this run claimed"
-        elif [ "$rec_pid" != "$$" ] || [ "$rec_uid" != "$EUID" ]; then
-            refusal="its provenance record belongs to another process"
         fi
+    fi
+    # A record whose home is already gone protects nothing and costs the temp root
+    # a file that nothing ever collects: the host sweep matches /tmp/tmp.* test
+    # environments, not these dot-files, and a surviving record also refuses the
+    # claim of any later home that reuses the leaf. Reaching here means the magic,
+    # path, pid and uid all matched, so this is our own record and retiring it
+    # cannot orphan somebody else's claim. A home that merely refuses a check is
+    # still there, and keeps its record.
+    if [ -z "$refusal" ] && [ -n "$gone" ]; then
+        if rm -f -- "$sentinel" 2>/dev/null; then
+            hermes_isolated_home_note "removed $dir (the run removed it already; its provenance record is retired)"
+        else
+            hermes_isolated_home_note "could not retire the provenance record for $dir; leaving it for the host sweep"
+        fi
+        return 0
     fi
     if [ -z "$refusal" ] && ! hermes_isolated_home_shape_ok "$dir"; then
         refusal="it no longer has the shape of a disposable home"
