@@ -226,9 +226,41 @@ class TestPowerShellPositionalScriptAndAbbreviatedSwitches:
         "\n ssh -x" * 3000,
     ])
     def test_repeated_launcher_words_scan_in_linear_time(self, command):
-        start = time.perf_counter()
-        assert not _is_dangerous(command)
-        assert time.perf_counter() - start < 2, command[:30]
+        # Why not an absolute wall-clock bound (this asserted `elapsed < 2`):
+        # the first scan in a fresh process pays regex/parse-cache setup that
+        # dwarfs the input-size effect -- the same 3000-token input measured
+        # ~2.2-2.4s cold and ~1.0-1.2s warm on an idle 4-core box, and 2.4-7.2s
+        # with the CPU oversubscribed the way four shared CI workers leave it.
+        # So `elapsed < 2` graded the machine, not the scanner: it failed 1 of
+        # 12 CI slices and 2 of 6 cold local reps while the scan stayed linear.
+        # Pin the property the name promises instead. Doubling the whole command
+        # (rather than slicing it) keeps every structural property the parser
+        # cares about -- balanced quotes, prefixes, separators -- so the ratio
+        # isolates the exponent. Linear -> ~2x for 2x input; quadratic -> ~4x.
+        # best-of-5 after a warm-up call, so neither the scheduler nor
+        # first-touch costs decide the verdict.
+        assert not _is_dangerous(command), ("warm-up", command[:30])  # pay setup cost once
+
+        def best(cmd: str, reps: int = 5) -> float:
+            times = []
+            for _ in range(reps):
+                start = time.perf_counter()
+                assert not _is_dangerous(cmd), cmd[:30]
+                times.append(time.perf_counter() - start)
+            return min(times)
+
+        single = best(command)
+        doubled = best(command + command)
+        # Measured on the four fixtures: a genuinely linear scan lands at 1.4-2.5x
+        # for 2x input (above 2.0 because 30KB->60KB crosses cache tiers), and the
+        # worst ratio seen with the CPU oversubscribed was 2.44. So 3.0 is the
+        # widest bound that still fails a quadratic scanner, which measures 4.0;
+        # the +0.1 absorbs the per-call constant without letting the smallest
+        # fixture (~0.25s) hide a real blowup. Worst measured budget use: 78%.
+        assert doubled <= single * 3.0 + 0.1, (single, doubled, command[:30])
+        # Gross-regression tripwire, deliberately loose: shape is pinned above,
+        # this only catches a scanner that stops being usable at all.
+        assert single < 15, command[:30]
 
 
 class TestDriveLetterRoots:
