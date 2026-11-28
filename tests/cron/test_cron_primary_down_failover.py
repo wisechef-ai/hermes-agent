@@ -18,7 +18,7 @@ from cron.scheduler import _job_fallback_chain
 from run_agent import AIAgent
 
 PRIMARY = ("local-llm", "local-llm")
-FALLBACK = ("openai-codex", "gpt-5.6-sol")
+FALLBACK = ("openai-codex", "gpt-5.6-luna")
 JOB = {"id": "down-job", "provider": "local-llm", "model": "local-llm",
        "fallback_providers": [{"provider": FALLBACK[0], "model": FALLBACK[1]}]}
 
@@ -92,6 +92,7 @@ def test_connection_refused_on_a_pinned_job_fails_over_within_two_primary_attemp
     result, calls = _drive(agent)
     assert result["final_response"] == "served by fallback"
     assert calls[-1] == FALLBACK
+    assert (agent.provider, agent.model) == FALLBACK  # the entitled lane the live job declares
     assert calls.count(PRIMARY) <= 2, calls
 
 
