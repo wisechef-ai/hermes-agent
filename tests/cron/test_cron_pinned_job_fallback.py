@@ -215,3 +215,70 @@ def test_pinned_job_failure_notice_does_not_promise_a_backup(monkeypatch):
     assert "pinned" in phrase and "--unpin" in phrase
     assert "succeeded" not in phrase
     assert scheduler._fallback_chain_phrase(_job()) == "No backup provider succeeded either."
+
+
+# -- a pinned job's OWN declared chain (``fallback_providers`` on the job record) -----------------
+# The global chain stays off-limits to a pin; the job may still carry an approved backup of its
+# own. Without it a pinned job's quota wall (zai 429 "Weekly/Monthly Limit Exhausted", 2026-11-15)
+# can only raise: there is nothing to fail over to.
+
+_OWN_CHAIN = [{"provider": "local-llm", "model": "local-llm"}]
+_PIN = {"provider": "anthropic", "model": "claude-sonnet-5-5"}
+
+
+def test_pinned_job_with_declared_chain_gets_its_own_chain_not_the_global_one(tmp_path):
+    success, error, _requested, agent_kwargs = _run(
+        tmp_path, _job(**_PIN, fallback_providers=list(_OWN_CHAIN)))
+    assert (success, error) == (True, None)
+    assert agent_kwargs["fallback_model"] == _OWN_CHAIN
+    assert agent_kwargs["fallback_model"] != _CHAIN
+
+
+def test_pinned_job_with_empty_declared_chain_has_no_fallback(tmp_path):
+    success, error, _requested, agent_kwargs = _run(
+        tmp_path, _job(**_PIN, fallback_providers=[]))
+    assert (success, error) == (True, None)
+    assert agent_kwargs["fallback_model"] is None
+
+
+def test_pinned_job_with_unusable_declared_chain_stays_unchained(tmp_path):
+    success, _error, _requested, agent_kwargs = _run(
+        tmp_path, _job(**_PIN, fallback_providers=[{"provider": "local-llm"}]))  # no model: dropped
+    assert success is True
+    assert agent_kwargs["fallback_model"] is None
+
+
+def test_unpinned_job_declared_chain_overrides_the_inherited_one(tmp_path):
+    success, _error, _requested, agent_kwargs = _run(
+        tmp_path, _job(fallback_providers=list(_OWN_CHAIN)))
+    assert success is True
+    assert agent_kwargs["fallback_model"] == _OWN_CHAIN
+
+
+def test_resolve_job_runtime_walks_the_declared_chain_for_a_pinned_job():
+    jc = _CronJobConfig(cfg={"fallback_providers": list(_CHAIN)}, model="claude-sonnet-5-5",
+                        model_cfg={}, cron_default_provider="")
+    asked = []
+
+    def resolve(**kwargs):
+        asked.append(kwargs.get("requested"))
+        if kwargs.get("requested") == "local-llm":
+            return _runtime("local-llm")
+        raise AuthError("No credentials stored")
+
+    with patch("hermes_cli.runtime_provider.resolve_runtime_provider", side_effect=resolve):
+        runtime, model = _resolve_job_runtime(
+            _job(**_PIN, fallback_providers=list(_OWN_CHAIN)), "pin-job", jc)
+    assert (runtime["provider"], model) == ("local-llm", "local-llm")
+    assert "openrouter" not in asked
+
+
+def test_declared_chain_pinned_job_failure_notice_does_not_say_unpin(monkeypatch):
+    monkeypatch.setattr(scheduler, "load_config", lambda: {"fallback_providers": list(_CHAIN)})
+    phrase = scheduler._fallback_chain_phrase(_job(**_PIN, fallback_providers=list(_OWN_CHAIN)))
+    assert phrase == "No backup provider succeeded either."
+
+
+def test_fallback_providers_is_an_authored_job_definition_field():
+    from cron.job_definition import JOB_DEFINITION_FIELDS
+    assert "fallback_providers" in JOB_DEFINITION_FIELDS
